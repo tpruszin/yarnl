@@ -16,6 +16,10 @@ const archiver = require('archiver');
 const unzipper = require('unzipper');
 const { Cron } = require('croner');
 const EventEmitter = require('events');
+const Tesseract = require('tesseract.js');
+const JsBarcode = require('jsbarcode');
+const axios = require('axios');
+const { v4: uuidv4 } = require('uuid');
 const { pool, initDatabase } = require('./db');
 const {
   hashPassword,
@@ -3200,7 +3204,105 @@ async function cleanupEmptyCategories() {
   }
 }
 
-// Configure multer for PDF uploads
+// NEW FEATURE HELPER: Generate unique inventory ID
+async function generateInventoryId(userId) {
+  const timestamp = Date.now().toString(36).toUpperCase();
+  const random = Math.random().toString(36).substring(2, 8).toUpperCase();
+  const inventoryId = `PAT-${timestamp}-${random}`;
+  
+  // Check if it already exists (extremely unlikely, but be safe)
+  const result = await pool.query('SELECT id FROM patterns WHERE inventory_id = $1', [inventoryId]);
+  if (result.rows.length === 0) {
+    return inventoryId;
+  }
+  // Recursively generate a new one if collision (extremely rare)
+  return generateInventoryId(userId);
+}
+
+// NEW FEATURE HELPER: Determine file type from MIME type
+function getFileTypeFromMime(mimetype) {
+  if (mimetype === 'application/pdf') return 'pdf';
+  if (mimetype.startsWith('image/')) return 'image';
+  return 'unknown';
+}
+
+// NEW FEATURE HELPER: Generate barcode image
+async function generateBarcodeImage(barcodeValue, barcodePath) {
+  try {
+    const canvas = require('canvas');
+    const canvasInstance = canvas.createCanvas(300, 150);
+    JsBarcode(canvasInstance, barcodeValue, {
+      format: 'CODE128',
+      width: 2,
+      height: 100,
+      margin: 10
+    });
+    const stream = canvasInstance.createPNGStream();
+    const out = fs.createWriteStream(barcodePath);
+    stream.pipe(out);
+    
+    return new Promise((resolve, reject) => {
+      out.on('finish', () => resolve(true));
+      out.on('error', reject);
+    });
+  } catch (error) {
+    console.error('Error generating barcode image:', error);
+    return false;
+  }
+}
+
+// NEW FEATURE HELPER: Perform OCR on image or PDF
+async function performOCR(filePath) {
+  try {
+    const result = await Tesseract.recognize(filePath, 'eng');
+    return result.data.text;
+  } catch (error) {
+    console.error('Error performing OCR:', error);
+    return null;
+  }
+}
+
+// NEW FEATURE HELPER: Extract text from PDF
+async function extractTextFromPDF(filePath) {
+  try {
+    const dataBuffer = fs.readFileSync(filePath);
+    const data = await pdfParse(dataBuffer);
+    return data.text;
+  } catch (error) {
+    console.error('Error extracting text from PDF:', error);
+    return null;
+  }
+}
+
+// NEW FEATURE HELPER: Generate thumbnail for image files
+async function generateImageThumbnail(imagePath, thumbnailFilename, username, category = 'General') {
+  try {
+    const usersDir = path.join(__dirname, 'users');
+    const userThumbsDir = path.join(usersDir, username, 'thumbnails');
+    
+    if (!fs.existsSync(userThumbsDir)) {
+      fs.mkdirSync(userThumbsDir, { recursive: true });
+    }
+
+    const thumbnailPath = path.join(userThumbsDir, thumbnailFilename);
+    
+    // Create a 200x250px thumbnail from the image
+    await sharp(imagePath)
+      .resize(200, 250, {
+        fit: 'contain',
+        background: { r: 255, g: 255, b: 255, alpha: 1 }
+      })
+      .jpeg({ quality: 80 })
+      .toFile(thumbnailPath);
+
+    return `thumbnails/${thumbnailFilename}`;
+  } catch (error) {
+    console.error('Error generating image thumbnail:', error);
+    return null;
+  }
+}
+
+// Configure multer for PDF and image uploads
 // Note: req.body is NOT available in these callbacks, so we use temp filenames
 const uploadTempDir = path.join(__dirname, 'temp-uploads');
 if (!fs.existsSync(uploadTempDir)) {
@@ -3222,14 +3324,21 @@ const storage = multer.diskStorage({
 const upload = multer({
   storage: storage,
   fileFilter: (req, file, cb) => {
-    if (file.mimetype === 'application/pdf') {
+    const allowedMimeTypes = [
+      'application/pdf',
+      'image/jpeg',
+      'image/png',
+      'image/webp',
+      'image/tiff'
+    ];
+    if (allowedMimeTypes.includes(file.mimetype)) {
       cb(null, true);
     } else {
-      cb(new Error('Only PDF files are allowed'));
+      cb(new Error('Only PDF and image files (JPEG, PNG, WebP, TIFF) are allowed'));
     }
   },
   limits: {
-    fileSize: 50 * 1024 * 1024 // 50MB limit
+    fileSize: 100 * 1024 * 1024 // 100MB limit (increased for large images)
   }
 });
 
@@ -3711,36 +3820,56 @@ app.get('/api/patterns', async (req, res) => {
   }
 });
 
-// Upload a new pattern
-app.post('/api/patterns', upload.single('pdf'), async (req, res) => {
+// Upload a new pattern (supports PDF and images)
+app.post('/api/patterns', upload.single('pdf'), authMiddleware, canUploadPdf, async (req, res) => {
   try {
     if (!req.file) {
       return res.status(400).json({ error: 'No file uploaded' });
     }
 
-    const name = req.body.name || req.file.originalname.replace('.pdf', '');
+    const name = req.body.name || req.file.originalname.replace(/\.[^.]*$/, '');
     const category = req.body.category || 'Amigurumi';
     const description = req.body.description || '';
     const isCurrent = req.body.isCurrent === 'true' || req.body.isCurrent === true;
+    
+    // NEW FEATURE: Pattern extended metadata
+    const needleSize = req.body.needleSize || null;
+    const yarnWeight = req.body.yarnWeight || null;
+    const yardageRequired = req.body.yardageRequired ? parseFloat(req.body.yardageRequired) : null;
+    const timeEstimateHours = req.body.timeEstimateHours ? parseInt(req.body.timeEstimateHours) : null;
+    const skillLevel = req.body.skillLevel || null;
+    const sizeRange = req.body.sizeRange || null;
+    const designerName = req.body.designerName || null;
+    const sourceUrl = req.body.sourceUrl || null;
+    
+    // NEW FEATURE: Barcode support
+    const generateBarcode = req.body.generateBarcode === 'true' || req.body.generateBarcode === true;
+    const enableOcr = req.body.enableOcr === 'true' || req.body.enableOcr === true;
 
     console.log('Upload received:');
     console.log('  - req.body.name:', req.body.name);
     console.log('  - computed name:', name);
-    console.log('  - req.file.filename:', req.file.filename);
-    console.log('  - req.file.originalname:', req.file.originalname);
+    console.log('  - file:', req.file.mimetype);
 
     // Ensure user directories exist
     const username = req.user.username;
     await ensureUserDirectories(username);
 
-    // Now we have access to req.body! Determine the final filename
+    // Determine file type and appropriate extension
+    const fileType = getFileTypeFromMime(req.file.mimetype);
+    let fileExtension;
+    if (fileType === 'pdf') fileExtension = '.pdf';
+    else if (fileType === 'image') fileExtension = `.${req.file.mimetype.split('/')[1]}`;
+    else fileExtension = path.extname(req.file.originalname);
+
+    // Get category directory
     const categoryDir = getCategoryDir(username, category);
 
     let finalFilename;
     if (req.body.name) {
       // User provided a custom name
       const sanitized = sanitizeFilename(req.body.name);
-      finalFilename = getUniqueFilename(categoryDir, sanitized, '.pdf');
+      finalFilename = getUniqueFilename(categoryDir, sanitized, fileExtension);
     } else {
       // No custom name, use original filename
       finalFilename = req.file.originalname;
@@ -3752,7 +3881,6 @@ app.post('/api/patterns', upload.single('pdf'), async (req, res) => {
     }
 
     // Move file from temp location to category folder with final name
-    // Use copy+delete instead of rename to handle cross-device moves (Docker volumes)
     const tempPath = req.file.path;
     const finalPath = path.join(categoryDir, finalFilename);
     fs.copyFileSync(tempPath, finalPath);
@@ -3760,20 +3888,70 @@ app.post('/api/patterns', upload.single('pdf'), async (req, res) => {
 
     console.log(`Moved file from ${tempPath} to ${finalPath}`);
 
-    // Generate thumbnail from PDF
-    const pdfPath = finalPath;
-    const thumbnailFilename = `thumb-${category}-${finalFilename}.jpg`;
-    const thumbnail = await generateThumbnail(pdfPath, thumbnailFilename, username);
+    // Generate thumbnail based on file type
+    let thumbnail = null;
+    if (fileType === 'pdf') {
+      const thumbnailFilename = `thumb-${category}-${finalFilename}.jpg`;
+      thumbnail = await generateThumbnail(finalPath, thumbnailFilename, username);
+    } else if (fileType === 'image') {
+      const thumbnailFilename = `thumb-${category}-${finalFilename}.jpg`;
+      thumbnail = await generateImageThumbnail(finalPath, thumbnailFilename, username, category);
+    }
+
+    // NEW FEATURE: Generate inventory ID
+    const inventoryId = await generateInventoryId(req.user.id);
+
+    // NEW FEATURE: OCR processing (extract text from image or PDF)
+    let extractedText = null;
+    if (enableOcr) {
+      if (fileType === 'image') {
+        extractedText = await performOCR(finalPath);
+      } else if (fileType === 'pdf') {
+        extractedText = await extractTextFromPDF(finalPath);
+      }
+    }
+
+    // NEW FEATURE: Generate barcode
+    let barcodeValue = null;
+    let barcodeImage = null;
+    if (generateBarcode) {
+      barcodeValue = inventoryId; // Use inventory ID as barcode
+      try {
+        // For now, store barcode value (barcode image generation requires canvas)
+        // This can be generated on-demand in the frontend
+        barcodeImage = `barcode-${inventoryId}.png`;
+      } catch (error) {
+        console.error('Error generating barcode:', error);
+      }
+    }
 
     const userId = req.user.id;
     const result = await pool.query(
-      `INSERT INTO patterns (name, filename, original_name, category, description, is_current, thumbnail, user_id)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+      `INSERT INTO patterns (name, filename, original_name, category, description, is_current, thumbnail, user_id, 
+        inventory_id, file_type, needle_size, yarn_weight, yardage_required, time_estimate_hours, 
+        skill_level, size_range, designer_name, source_url, extracted_text, ocr_processed,
+        barcode_value, barcode_format, barcode_image)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23)
        RETURNING *`,
-      [name, finalFilename, req.file.originalname, category, description, isCurrent, thumbnail, userId]
+      [name, finalFilename, req.file.originalname, category, description, isCurrent, thumbnail, userId,
+        inventoryId, fileType, needleSize, yarnWeight, yardageRequired, timeEstimateHours,
+        skillLevel, sizeRange, designerName, sourceUrl, extractedText, enableOcr,
+        barcodeValue, 'CODE128', barcodeImage]
     );
 
-    res.json(result.rows[0]);
+    const pattern = result.rows[0];
+    
+    // NEW FEATURE: Store barcode in database
+    if (generateBarcode && barcodeValue) {
+      await pool.query(
+        `INSERT INTO barcode_database (user_id, barcode_value, item_type, item_id, item_name, is_custom_barcode)
+         VALUES ($1, $2, $3, $4, $5, $6)
+         ON CONFLICT DO NOTHING`,
+        [userId, barcodeValue, 'pattern', pattern.id, name, true]
+      );
+    }
+
+    res.json(pattern);
   } catch (error) {
     console.error('Error uploading pattern:', error);
     res.status(500).json({ error: error.message });
@@ -3781,9 +3959,11 @@ app.post('/api/patterns', upload.single('pdf'), async (req, res) => {
 });
 
 // Create a new markdown pattern
-app.post('/api/patterns/markdown', async (req, res) => {
+app.post('/api/patterns/markdown', authMiddleware, async (req, res) => {
   try {
-    const { name, category, description, content, isCurrent, rating, difficulty, hashtagIds } = req.body;
+    const { name, category, description, content, isCurrent, rating, difficulty, hashtagIds,
+            needleSize, yarnWeight, yardageRequired, timeEstimateHours, skillLevel, sizeRange, 
+            designerName, sourceUrl, generateBarcode, enableOcr } = req.body;
 
     if (!name || !name.trim()) {
       return res.status(400).json({ error: 'Pattern name is required' });
@@ -3798,6 +3978,16 @@ app.post('/api/patterns/markdown', async (req, res) => {
     const patternIsCurrent = isCurrent === true || isCurrent === 'true';
     const patternRating = Math.max(0, Math.min(5, parseInt(rating) || 0));
     const patternDifficulty = Math.max(0, Math.min(10, parseInt(difficulty) || 0));
+    
+    // NEW FEATURE: Extended metadata
+    const needleSizeVal = needleSize || null;
+    const yarnWeightVal = yarnWeight || null;
+    const yardageRequiredVal = yardageRequired ? parseFloat(yardageRequired) : null;
+    const timeEstimateHoursVal = timeEstimateHours ? parseInt(timeEstimateHours) : null;
+    const skillLevelVal = skillLevel || null;
+    const sizeRangeVal = sizeRange || null;
+    const designerNameVal = designerName || null;
+    const sourceUrlVal = sourceUrl || null;
 
     // Ensure user directories exist
     const username = req.user.username;
@@ -3814,12 +4004,25 @@ app.post('/api/patterns/markdown', async (req, res) => {
     const filePath = path.join(categoryDir, filename);
     fs.writeFileSync(filePath, content, 'utf8');
 
+    // NEW FEATURE: Generate inventory ID
+    const inventoryId = await generateInventoryId(req.user.id);
+
+    // NEW FEATURE: Generate barcode
+    let barcodeValue = null;
+    if (generateBarcode) {
+      barcodeValue = inventoryId;
+    }
+
     const userId = req.user.id;
     const result = await pool.query(
-      `INSERT INTO patterns (name, filename, original_name, category, description, is_current, rating, difficulty, pattern_type, user_id)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'markdown', $9)
+      `INSERT INTO patterns (name, filename, original_name, category, description, is_current, rating, difficulty, pattern_type, user_id,
+        inventory_id, file_type, needle_size, yarn_weight, yardage_required, time_estimate_hours,
+        skill_level, size_range, designer_name, source_url, barcode_value, barcode_format)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'markdown', $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
        RETURNING *`,
-      [name.trim(), filename, filename, patternCategory, patternDescription, patternIsCurrent, patternRating, patternDifficulty, userId]
+      [name.trim(), filename, filename, patternCategory, patternDescription, patternIsCurrent, patternRating, patternDifficulty, userId,
+        inventoryId, 'markdown', needleSizeVal, yarnWeightVal, yardageRequiredVal, timeEstimateHoursVal,
+        skillLevelVal, sizeRangeVal, designerNameVal, sourceUrlVal, barcodeValue, 'CODE128']
     );
 
     const pattern = result.rows[0];
@@ -3832,6 +4035,16 @@ app.post('/api/patterns/markdown', async (req, res) => {
           [pattern.id, hashtagId]
         );
       }
+    }
+
+    // NEW FEATURE: Store barcode if generated
+    if (generateBarcode && barcodeValue) {
+      await pool.query(
+        `INSERT INTO barcode_database (user_id, barcode_value, item_type, item_id, item_name, is_custom_barcode)
+         VALUES ($1, $2, $3, $4, $5, $6)
+         ON CONFLICT DO NOTHING`,
+        [userId, barcodeValue, 'pattern', pattern.id, name, true]
+      );
     }
 
     // Fetch hashtags to include in response
@@ -9832,6 +10045,412 @@ app.post('/api/settings/archive', async (req, res) => {
     res.json({ success: true, settings: newSettings });
   } catch (error) {
     console.error('Error saving archive settings:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ============================================
+// NEW FEATURE: Thread Inventory Endpoints
+// ============================================
+
+// Get all threads for current user
+app.get('/api/threads', authMiddleware, async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT * FROM threads WHERE user_id = $1 ORDER BY name ASC`,
+      [req.user.id]
+    );
+    res.json(result.rows);
+  } catch (error) {
+    console.error('Error fetching threads:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Create a new thread
+app.post('/api/threads', authMiddleware, async (req, res) => {
+  try {
+    const {name, brand, colorName, colorHex, threadType, weight, lengthMeters, quantity, needleSize, notes} = req.body;
+    
+    const result = await pool.query(
+      `INSERT INTO threads (user_id, name, brand, color_name, color_hex, thread_type, weight, length_meters, quantity, needle_size, notes)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+       RETURNING *`,
+      [req.user.id, name, brand, colorName, colorHex, threadType, weight, lengthMeters, quantity, needleSize, notes]
+    );
+    
+    res.json(result.rows[0]);
+  } catch (error) {
+    console.error('Error creating thread:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Update a thread
+app.put('/api/threads/:id', authMiddleware, async (req, res) => {
+  try {
+    const threadId = parseInt(req.params.id);
+    const {name, brand, colorName, colorHex, threadType, weight, lengthMeters, quantity, needleSize, isFavorite, rating, notes} = req.body;
+    
+    const result = await pool.query(
+      `UPDATE threads 
+       SET name = $1, brand = $2, color_name = $3, color_hex = $4, thread_type = $5, weight = $6, 
+           length_meters = $7, quantity = $8, needle_size = $9, is_favorite = $10, rating = $11, notes = $12,
+           updated_at = CURRENT_TIMESTAMP
+       WHERE id = $13 AND user_id = $14
+       RETURNING *`,
+      [name, brand, colorName, colorHex, threadType, weight, lengthMeters, quantity, needleSize, isFavorite, rating, notes, threadId, req.user.id]
+    );
+    
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Thread not found' });
+    }
+    
+    res.json(result.rows[0]);
+  } catch (error) {
+    console.error('Error updating thread:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Delete a thread
+app.delete('/api/threads/:id', authMiddleware, async (req, res) => {
+  try {
+    const threadId = parseInt(req.params.id);
+    
+    await pool.query(
+      `DELETE FROM threads WHERE id = $1 AND user_id = $2`,
+      [threadId, req.user.id]
+    );
+    
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Error deleting thread:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ============================================
+// NEW FEATURE: Materials Inventory Endpoints
+// ============================================
+
+// Get all materials for current user
+app.get('/api/materials', authMiddleware, async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT * FROM materials WHERE user_id = $1 ORDER BY name ASC`,
+      [req.user.id]
+    );
+    res.json(result.rows);
+  } catch (error) {
+    console.error('Error fetching materials:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Create a new material
+app.post('/api/materials', authMiddleware, async (req, res) => {
+  try {
+    const {name, category, description, quantity, unit, color, notes} = req.body;
+    
+    // Generate barcode for material
+    const barcode = `MAT-${uuidv4().substring(0, 8).toUpperCase()}`;
+    
+    const result = await pool.query(
+      `INSERT INTO materials (user_id, name, category, description, quantity, unit, color, barcode_value, notes)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+       RETURNING *`,
+      [req.user.id, name, category, description, quantity, unit, color, barcode, notes]
+    );
+    
+    res.json(result.rows[0]);
+  } catch (error) {
+    console.error('Error creating material:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Update a material
+app.put('/api/materials/:id', authMiddleware, async (req, res) => {
+  try {
+    const materialId = parseInt(req.params.id);
+    const {name, category, description, quantity, unit, color, isFavorite, rating, notes} = req.body;
+    
+    const result = await pool.query(
+      `UPDATE materials 
+       SET name = $1, category = $2, description = $3, quantity = $4, unit = $5, color = $6, 
+           is_favorite = $7, rating = $8, notes = $9, updated_at = CURRENT_TIMESTAMP
+       WHERE id = $10 AND user_id = $11
+       RETURNING *`,
+      [name, category, description, quantity, unit, color, isFavorite, rating, notes, materialId, req.user.id]
+    );
+    
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Material not found' });
+    }
+    
+    res.json(result.rows[0]);
+  } catch (error) {
+    console.error('Error updating material:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Delete a material
+app.delete('/api/materials/:id', authMiddleware, async (req, res) => {
+  try {
+    const materialId = parseInt(req.params.id);
+    
+    await pool.query(
+      `DELETE FROM materials WHERE id = $1 AND user_id = $2`,
+      [materialId, req.user.id]
+    );
+    
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Error deleting material:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ============================================
+// NEW FEATURE: Barcode Endpoints
+// ============================================
+
+// Generate barcode for a pattern
+app.post('/api/patterns/:id/barcode', authMiddleware, async (req, res) => {
+  try {
+    const patternId = parseInt(req.params.id);
+    
+    const pattern = await pool.query(
+      `SELECT * FROM patterns WHERE id = $1 AND user_id = $2`,
+      [patternId, req.user.id]
+    );
+    
+    if (pattern.rows.length === 0) {
+      return res.status(404).json({ error: 'Pattern not found' });
+    }
+    
+    const p = pattern.rows[0];
+    let barcodeValue = p.barcode_value;
+    
+    if (!barcodeValue) {
+      barcodeValue = p.inventory_id || `PAT-${uuidv4().substring(0, 12).toUpperCase()}`;
+    }
+    
+    // For frontend to generate the barcode
+    res.json({ barcode: barcodeValue });
+  } catch (error) {
+    console.error('Error generating barcode:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Scan barcode and return matching item
+app.post('/api/barcode/scan', authMiddleware, async (req, res) => {
+  try {
+    const {barcodeValue} = req.body;
+    
+    if (!barcodeValue) {
+      return res.status(400).json({ error: 'Barcode value required' });
+    }
+    
+    // Check in barcode database
+    const dbResult = await pool.query(
+      `SELECT * FROM barcode_database WHERE user_id = $1 AND barcode_value = $2`,
+      [req.user.id, barcodeValue]
+    );
+    
+    if (dbResult.rows.length > 0) {
+      const record = dbResult.rows[0];
+      
+      // Fetch the actual item
+      if (record.item_type === 'pattern') {
+        const item = await pool.query(
+          `SELECT * FROM patterns WHERE id = $1`,
+          [record.item_id]
+        );
+        return res.json({ found: true, type: 'pattern', item: item.rows[0] });
+      } else if (record.item_type === 'material') {
+        const item = await pool.query(
+          `SELECT * FROM materials WHERE id = $1`,
+          [record.item_id]
+        );
+        return res.json({ found: true, type: 'material', item: item.rows[0] });
+      }
+    }
+    
+    res.json({ found: false, message: 'Barcode not found' });
+  } catch (error) {
+    console.error('Error scanning barcode:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ============================================
+// NEW FEATURE: OCR Endpoint
+// ============================================
+
+// Perform OCR on a pattern file
+app.post('/api/patterns/:id/ocr', authMiddleware, async (req, res) => {
+  try {
+    const patternId = parseInt(req.params.id);
+    
+    const pattern = await pool.query(
+      `SELECT * FROM patterns WHERE id = $1 AND user_id = $2`,
+      [patternId, req.user.id]
+    );
+    
+    if (pattern.rows.length === 0) {
+      return res.status(404).json({ error: 'Pattern not found' });
+    }
+    
+    const p = pattern.rows[0];
+    const username = req.user.username;
+    const filePath = path.join(__dirname, 'users', username, 'patterns', p.category, p.filename);
+    
+    if (!fs.existsSync(filePath)) {
+      return res.status(404).json({ error: 'Pattern file not found' });
+    }
+    
+    // Perform OCR
+    let extractedText = null;
+    if (p.file_type === 'image' || (p.file_type === 'pdf' && p.pattern_type !== 'markdown')) {
+      if (p.file_type === 'image') {
+        extractedText = await performOCR(filePath);
+      } else if (p.file_type === 'pdf') {
+        extractedText = await extractTextFromPDF(filePath);
+      }
+    }
+    
+    // Update pattern with extracted text
+    if (extractedText) {
+      await pool.query(
+        `UPDATE patterns SET extracted_text = $1, ocr_processed = true WHERE id = $2`,
+        [extractedText, patternId]
+      );
+    }
+    
+    res.json({ success: true, extractedText });
+  } catch (error) {
+    console.error('Error performing OCR:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ============================================
+// NEW FEATURE: Threadloop Integration Endpoints
+// ============================================
+
+// Save Threadloop API credentials
+app.post('/api/threadloop/settings', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const {apiKey, username} = req.body;
+    
+    await pool.query(
+      `UPDATE users SET threadloop_api_key = $1, threadloop_username = $2 WHERE id = $3`,
+      [apiKey, username, req.user.id]
+    );
+    
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Error saving Threadloop settings:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Fetch patterns from Threadloop
+app.get('/api/threadloop/patterns', authMiddleware, async (req, res) => {
+  try {
+    const user = await pool.query(
+      `SELECT threadloop_api_key, threadloop_username FROM users WHERE id = $1`,
+      [req.user.id]
+    );
+    
+    if (user.rows.length === 0 || !user.rows[0].threadloop_api_key) {
+      return res.status(400).json({ error: 'Threadloop not configured' });
+    }
+    
+    const apiKey = user.rows[0].threadloop_api_key;
+    const username = user.rows[0].threadloop_username;
+    
+    // Fetch from Threadloop API (placeholder - actual URL would depend on Threadloop API docs)
+    try {
+      const response = await axios.get(
+        `https://api.threadloop.com/v1/users/${username}/patterns`,
+        {
+          headers: {
+            'Authorization': `Bearer ${apiKey}`,
+            'Content-Type': 'application/json'
+          }
+        }
+      );
+      
+      res.json(response.data);
+    } catch (error) {
+      console.error('Threadloop API error:', error);
+      res.status(500).json({ error: 'Failed to fetch from Threadloop' });
+    }
+  } catch (error) {
+    console.error('Error fetching Threadloop patterns:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Import pattern from Threadloop
+app.post('/api/threadloop/import', authMiddleware, async (req, res) => {
+  try {
+    const {threadloopPatternId} = req.body;
+    
+    const user = await pool.query(
+      `SELECT threadloop_api_key, threadloop_username FROM users WHERE id = $1`,
+      [req.user.id]
+    );
+    
+    if (user.rows.length === 0 || !user.rows[0].threadloop_api_key) {
+      return res.status(400).json({ error: 'Threadloop not configured' });
+    }
+    
+    const apiKey = user.rows[0].threadloop_api_key;
+    
+    // Fetch pattern from Threadloop
+    try {
+      const response = await axios.get(
+        `https://api.threadloop.com/v1/patterns/${threadloopPatternId}`,
+        {
+          headers: {
+            'Authorization': `Bearer ${apiKey}`,
+            'Content-Type': 'application/json'
+          }
+        }
+      );
+      
+      const threadloopPattern = response.data;
+      
+      // Create pattern in Yarnl
+      const result = await pool.query(
+        `INSERT INTO patterns (name, filename, original_name, category, description, user_id, threadloop_url, threadloop_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+         RETURNING *`,
+        [
+          threadloopPattern.name,
+          `threadloop-${threadloopPatternId}.md`,
+          threadloopPattern.name,
+          'Imported',
+          threadloopPattern.description || '',
+          req.user.id,
+          threadloopPattern.url,
+          threadloopPatternId
+        ]
+      );
+      
+      res.json(result.rows[0]);
+    } catch (error) {
+      console.error('Threadloop import error:', error);
+      res.status(500).json({ error: 'Failed to import from Threadloop' });
+    }
+  } catch (error) {
+    console.error('Error importing from Threadloop:', error);
     res.status(500).json({ error: error.message });
   }
 });

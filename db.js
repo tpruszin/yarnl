@@ -572,6 +572,152 @@ async function initDatabase() {
       END $$;
     `);
 
+    // NEW FEATURE: Add pattern inventory and extended metadata
+    await client.query(`
+      DO $$
+      BEGIN
+        -- Add unique inventory ID for own pattern numbering
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                      WHERE table_name='patterns' AND column_name='inventory_id') THEN
+          ALTER TABLE patterns ADD COLUMN inventory_id VARCHAR(100) UNIQUE;
+        END IF;
+
+        -- Add extended pattern metadata for better organization
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                      WHERE table_name='patterns' AND column_name='needle_size') THEN
+          ALTER TABLE patterns ADD COLUMN needle_size VARCHAR(50);
+          ALTER TABLE patterns ADD COLUMN yarn_weight VARCHAR(100);
+          ALTER TABLE patterns ADD COLUMN yardage_required NUMERIC(8,1);
+          ALTER TABLE patterns ADD COLUMN time_estimate_hours INTEGER;
+          ALTER TABLE patterns ADD COLUMN skill_level VARCHAR(20);
+          ALTER TABLE patterns ADD COLUMN size_range VARCHAR(100);
+          ALTER TABLE patterns ADD COLUMN designer_name VARCHAR(255);
+          ALTER TABLE patterns ADD COLUMN source_url TEXT;
+        END IF;
+
+        -- Add file type field to support images, PDFs, and markdown
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                      WHERE table_name='patterns' AND column_name='file_type') THEN
+          ALTER TABLE patterns ADD COLUMN file_type VARCHAR(20) DEFAULT 'pdf';
+        END IF;
+
+        -- Add barcode support
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                      WHERE table_name='patterns' AND column_name='barcode_value') THEN
+          ALTER TABLE patterns ADD COLUMN barcode_value VARCHAR(255) UNIQUE;
+          ALTER TABLE patterns ADD COLUMN barcode_format VARCHAR(20);
+          ALTER TABLE patterns ADD COLUMN barcode_image VARCHAR(255);
+        END IF;
+
+        -- Add OCR extracted text
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                      WHERE table_name='patterns' AND column_name='extracted_text') THEN
+          ALTER TABLE patterns ADD COLUMN extracted_text TEXT;
+          ALTER TABLE patterns ADD COLUMN ocr_processed BOOLEAN DEFAULT false;
+        END IF;
+
+        -- Add external integrations
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                      WHERE table_name='patterns' AND column_name='threadloop_url') THEN
+          ALTER TABLE patterns ADD COLUMN threadloop_url TEXT;
+          ALTER TABLE patterns ADD COLUMN threadloop_id VARCHAR(255);
+        END IF;
+      END $$;
+    `);
+
+    // NEW FEATURE: Create threads table for thread inventory
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS threads (
+        id SERIAL PRIMARY KEY,
+        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        name VARCHAR(255),
+        brand VARCHAR(255),
+        color_name VARCHAR(100),
+        color_hex VARCHAR(7),
+        thread_type VARCHAR(50),
+        weight VARCHAR(50),
+        length_meters INTEGER,
+        quantity INTEGER DEFAULT 1,
+        needle_size VARCHAR(20),
+        is_favorite BOOLEAN DEFAULT false,
+        rating INTEGER DEFAULT 0,
+        notes TEXT,
+        thumbnail VARCHAR(255),
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
+    // NEW FEATURE: Create materials table for general materials inventory
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS materials (
+        id SERIAL PRIMARY KEY,
+        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        name VARCHAR(255) NOT NULL,
+        category VARCHAR(100),
+        description TEXT,
+        quantity NUMERIC(10,2),
+        unit VARCHAR(50),
+        color VARCHAR(100),
+        is_favorite BOOLEAN DEFAULT false,
+        rating INTEGER DEFAULT 0,
+        notes TEXT,
+        thumbnail VARCHAR(255),
+        barcode_value VARCHAR(255),
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
+    // NEW FEATURE: Create pattern_threads junction table
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS pattern_threads (
+        pattern_id INTEGER NOT NULL REFERENCES patterns(id) ON DELETE CASCADE,
+        thread_id INTEGER NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
+        quantity_needed INTEGER,
+        PRIMARY KEY (pattern_id, thread_id)
+      )
+    `);
+
+    // NEW FEATURE: Create pattern_materials junction table
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS pattern_materials (
+        pattern_id INTEGER NOT NULL REFERENCES patterns(id) ON DELETE CASCADE,
+        material_id INTEGER NOT NULL REFERENCES materials(id) ON DELETE CASCADE,
+        quantity_needed NUMERIC(10,2),
+        notes VARCHAR(255),
+        PRIMARY KEY (pattern_id, material_id)
+      )
+    `);
+
+    // NEW FEATURE: Add Threadloop integration settings
+    await client.query(`
+      DO $$
+      BEGIN
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                      WHERE table_name='users' AND column_name='threadloop_api_key') THEN
+          ALTER TABLE users ADD COLUMN threadloop_api_key TEXT;
+          ALTER TABLE users ADD COLUMN threadloop_username VARCHAR(255);
+        END IF;
+      END $$;
+    `);
+
+    // NEW FEATURE: Create barcode_database table for storing barcode references
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS barcode_database (
+        id SERIAL PRIMARY KEY,
+        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        barcode_value VARCHAR(255) NOT NULL,
+        item_type VARCHAR(50),
+        item_id INTEGER,
+        item_name VARCHAR(255),
+        is_custom_barcode BOOLEAN DEFAULT true,
+        database_source VARCHAR(50),
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(user_id, barcode_value)
+      )
+    `);
+
     console.log('Database initialized successfully');
   } catch (error) {
     console.error('Error initializing database:', error);

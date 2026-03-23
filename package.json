@@ -26,7 +26,11 @@
     "pdf-parse": "^1.1.1",
     "pg": "^8.11.3",
     "sharp": "^0.33.1",
-    "unzipper": "^0.10.14"
+    "unzipper": "^0.10.14",
+    "tesseract.js": "^5.0.4",
+    "jsbarcode": "^3.11.5",
+    "axios": "^1.6.2",
+    "uuid": "^9.0.1"
   },
   "devDependencies": {
     "nodemon": "^3.0.1"
