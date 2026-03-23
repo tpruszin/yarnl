@@ -17,7 +17,7 @@ services:
 
   yarnl:
     container_name: yarnl
-    image: titandrive/yarnl:latest
+    image: tpruszin/yarnl:latest
     ports:
       - "${PORT:-3000}:3000"
     volumes:
