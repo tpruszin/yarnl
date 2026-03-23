@@ -5228,24 +5228,37 @@ function initUpload() {
 }
 
 async function handleFiles(files) {
-    // Filter only PDF files
-    const pdfFiles = files.filter(f => f.type === 'application/pdf');
+    // Filter files that are PDFs or images
+    const validFiles = files.filter(f => 
+        f.type === 'application/pdf' || 
+        f.type.startsWith('image/')
+    );
 
-    if (pdfFiles.length === 0) {
+    if (validFiles.length === 0) {
         return;
     }
 
     // Process files one at a time to handle duplicates sequentially
-    for (const file of pdfFiles) {
+    for (const file of validFiles) {
         const result = await processFileForStaging(file);
         if (result) {
             stagedFiles.push(result);
 
             // Generate thumbnail preview asynchronously
-            generatePdfThumbnail(file).then(url => {
-                result.thumbnailUrl = url;
-                renderStagedFiles();
-            }).catch(err => console.log('Could not generate thumbnail:', err));
+            if (file.type === 'application/pdf') {
+                generatePdfThumbnail(file).then(url => {
+                    result.thumbnailUrl = url;
+                    renderStagedFiles();
+                }).catch(err => console.log('Could not generate thumbnail:', err));
+            } else {
+                // For images, use the file itself as thumbnail
+                const reader = new FileReader();
+                reader.onload = (e) => {
+                    result.thumbnailUrl = e.target.result;
+                    renderStagedFiles();
+                };
+                reader.readAsDataURL(file);
+            }
         }
     }
 
@@ -5522,6 +5535,101 @@ function renderStagedFiles() {
                                           oninput="document.getElementById('desc-count-${stagedFile.id}').textContent = this.value.length; updateStagedFile('${stagedFile.id}', 'description', this.value)"
                                           ${isUploading || stagedFile.status === 'success' ? 'disabled' : ''}>
                             </div>
+                            <!-- Extended Metadata -->
+                            <div class="staged-file-extended">
+                                <div class="staged-file-form-row">
+                                    <div class="form-group">
+                                        <label>Needle/Hook Size</label>
+                                        <input type="text"
+                                               value="${escapeHtml(stagedFile.needleSize || '')}"
+                                               placeholder="e.g., 5mm, US H-8"
+                                               oninput="updateStagedFile('${stagedFile.id}', 'needleSize', this.value)"
+                                               ${isUploading || stagedFile.status === 'success' ? 'disabled' : ''}>
+                                    </div>
+                                    <div class="form-group">
+                                        <label>Yarn Weight</label>
+                                        <select onchange="updateStagedFile('${stagedFile.id}', 'yarnWeight', this.value)"
+                                                ${isUploading || stagedFile.status === 'success' ? 'disabled' : ''}>
+                                            <option value="">Select weight</option>
+                                            <option value="lace" ${stagedFile.yarnWeight === 'lace' ? 'selected' : ''}>Lace</option>
+                                            <option value="super-fine" ${stagedFile.yarnWeight === 'super-fine' ? 'selected' : ''}>Super Fine</option>
+                                            <option value="fine" ${stagedFile.yarnWeight === 'fine' ? 'selected' : ''}>Fine</option>
+                                            <option value="light" ${stagedFile.yarnWeight === 'light' ? 'selected' : ''}>Light</option>
+                                            <option value="medium" ${stagedFile.yarnWeight === 'medium' ? 'selected' : ''}>Medium (Worsted)</option>
+                                            <option value="bulky" ${stagedFile.yarnWeight === 'bulky' ? 'selected' : ''}>Bulky</option>
+                                            <option value="super-bulky" ${stagedFile.yarnWeight === 'super-bulky' ? 'selected' : ''}>Super Bulky</option>
+                                            <option value="jumbo" ${stagedFile.yarnWeight === 'jumbo' ? 'selected' : ''}>Jumbo</option>
+                                        </select>
+                                    </div>
+                                    <div class="form-group">
+                                        <label>Yardage/Meters</label>
+                                        <input type="text"
+                                               value="${escapeHtml(stagedFile.yardage || '')}"
+                                               placeholder="e.g., 200 yards"
+                                               oninput="updateStagedFile('${stagedFile.id}', 'yardage', this.value)"
+                                               ${isUploading || stagedFile.status === 'success' ? 'disabled' : ''}>
+                                    </div>
+                                </div>
+                                <div class="staged-file-form-row">
+                                    <div class="form-group">
+                                        <label>Gauge</label>
+                                        <input type="text"
+                                               value="${escapeHtml(stagedFile.gauge || '')}"
+                                               placeholder="e.g., 18 sts x 24 rows = 4&quot;"
+                                               oninput="updateStagedFile('${stagedFile.id}', 'gauge', this.value)"
+                                               ${isUploading || stagedFile.status === 'success' ? 'disabled' : ''}>
+                                    </div>
+                                    <div class="form-group">
+                                        <label>Finished Size</label>
+                                        <input type="text"
+                                               value="${escapeHtml(stagedFile.finishedSize || '')}"
+                                               placeholder="e.g., 8&quot; x 10&quot;"
+                                               oninput="updateStagedFile('${stagedFile.id}', 'finishedSize', this.value)"
+                                               ${isUploading || stagedFile.status === 'success' ? 'disabled' : ''}>
+                                    </div>
+                                    <div class="form-group">
+                                        <label>Skill Level</label>
+                                        <select onchange="updateStagedFile('${stagedFile.id}', 'skillLevel', this.value)"
+                                                ${isUploading || stagedFile.status === 'success' ? 'disabled' : ''}>
+                                            <option value="">Select level</option>
+                                            <option value="beginner" ${stagedFile.skillLevel === 'beginner' ? 'selected' : ''}>Beginner</option>
+                                            <option value="easy" ${stagedFile.skillLevel === 'easy' ? 'selected' : ''}>Easy</option>
+                                            <option value="intermediate" ${stagedFile.skillLevel === 'intermediate' ? 'selected' : ''}>Intermediate</option>
+                                            <option value="advanced" ${stagedFile.skillLevel === 'advanced' ? 'selected' : ''}>Advanced</option>
+                                            <option value="expert" ${stagedFile.skillLevel === 'expert' ? 'selected' : ''}>Expert</option>
+                                        </select>
+                                    </div>
+                                </div>
+                                <!-- Feature Toggles -->
+                                <div class="staged-file-features">
+                                    <div class="feature-toggle">
+                                        <label class="toggle-switch">
+                                            <input type="checkbox"
+                                                   ${stagedFile.enableOcr ? 'checked' : ''}
+                                                   onchange="updateStagedFile('${stagedFile.id}', 'enableOcr', this.checked)"
+                                                   ${isUploading || stagedFile.status === 'success' ? 'disabled' : ''}>
+                                            <span class="toggle-slider"></span>
+                                        </label>
+                                        <div class="feature-info">
+                                            <span class="feature-name">Enable OCR</span>
+                                            <span class="feature-desc">Extract text from images/PDFs</span>
+                                        </div>
+                                    </div>
+                                    <div class="feature-toggle">
+                                        <label class="toggle-switch">
+                                            <input type="checkbox"
+                                                   ${stagedFile.enableBarcode ? 'checked' : ''}
+                                                   onchange="updateStagedFile('${stagedFile.id}', 'enableBarcode', this.checked)"
+                                                   ${isUploading || stagedFile.status === 'success' ? 'disabled' : ''}>
+                                            <span class="toggle-slider"></span>
+                                        </label>
+                                        <div class="feature-info">
+                                            <span class="feature-name">Generate Barcode</span>
+                                            <span class="feature-desc">Create barcode for inventory</span>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -5711,10 +5819,22 @@ async function uploadStagedFile(stagedFile) {
 
     const formData = new FormData();
     formData.append('pdf', stagedFile.file);
-    formData.append('name', stagedFile.name || stagedFile.file.name.replace('.pdf', ''));
+    formData.append('name', stagedFile.name || stagedFile.file.name.replace(/\.(pdf|jpg|jpeg|png|gif|webp|bmp|tiff)$/i, ''));
     formData.append('category', stagedFile.category);
     formData.append('description', stagedFile.description);
     formData.append('isCurrent', stagedFile.isCurrent);
+
+    // Add extended metadata
+    if (stagedFile.needleSize) formData.append('needleSize', stagedFile.needleSize);
+    if (stagedFile.yarnWeight) formData.append('yarnWeight', stagedFile.yarnWeight);
+    if (stagedFile.yardage) formData.append('yardage', stagedFile.yardage);
+    if (stagedFile.gauge) formData.append('gauge', stagedFile.gauge);
+    if (stagedFile.finishedSize) formData.append('finishedSize', stagedFile.finishedSize);
+    if (stagedFile.skillLevel) formData.append('skillLevel', stagedFile.skillLevel);
+
+    // Add feature toggles
+    formData.append('enableOcr', stagedFile.enableOcr || false);
+    formData.append('enableBarcode', stagedFile.enableBarcode || false);
 
     try {
         const xhr = new XMLHttpRequest();
@@ -7635,6 +7755,18 @@ async function saveNewPattern() {
     const hashtagIds = getSelectedHashtagIds('new-pattern-hashtags');
     const thumbnailFile = getThumbnailFile('new-pattern');
 
+    // Extended metadata
+    const needleSize = document.getElementById('new-pattern-needle-size').value.trim();
+    const yarnWeight = document.getElementById('new-pattern-yarn-weight').value;
+    const yardage = document.getElementById('new-pattern-yardage').value.trim();
+    const gauge = document.getElementById('new-pattern-gauge').value.trim();
+    const finishedSize = document.getElementById('new-pattern-finished-size').value.trim();
+    const skillLevel = document.getElementById('new-pattern-skill-level').value;
+
+    // Feature toggles
+    const enableOcr = document.getElementById('new-pattern-enable-ocr').checked;
+    const enableBarcode = document.getElementById('new-pattern-enable-barcode').checked;
+
     if (!name) {
         alert('Please enter a pattern name');
         return;
@@ -7656,7 +7788,15 @@ async function saveNewPattern() {
                 content,
                 isCurrent,
                 rating,
-                hashtagIds
+                hashtagIds,
+                needleSize,
+                yarnWeight,
+                yardage,
+                gauge,
+                finishedSize,
+                skillLevel,
+                enableOcr,
+                enableBarcode
             })
         });
 
