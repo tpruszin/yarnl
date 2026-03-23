@@ -18498,6 +18498,282 @@ function exitLibraryEditMode() {
     displayPatterns();
 }
 
+// ============ New Features: Threads, Materials, Barcodes, OCR, Threadloop ============
+
+// Thread Management Functions
+async function loadThreads() {
+    try {
+        const response = await fetch(`${API_URL}/api/threads`);
+        const threads = await response.json();
+        const threadsList = document.getElementById('threads-list');
+        if (threadsList) {
+            threadsList.innerHTML = threads.map(thread => `
+                <div class="thread-item" data-id="${thread.id}">
+                    <div class="thread-info">
+                        <strong>${escapeHtml(thread.name)}</strong>
+                        <span>${escapeHtml(thread.brand || 'Unknown Brand')}</span>
+                        <span>${escapeHtml(thread.color || 'Unknown Color')}</span>
+                        <span>${thread.quantity || 0} skeins</span>
+                    </div>
+                    <div class="thread-actions">
+                        <button onclick="editThread(${thread.id})">Edit</button>
+                        <button onclick="deleteThread(${thread.id})">Delete</button>
+                    </div>
+                </div>
+            `).join('');
+        }
+    } catch (error) {
+        console.error('Error loading threads:', error);
+    }
+}
+
+async function addThread() {
+    const name = document.getElementById('thread-name').value;
+    const brand = document.getElementById('thread-brand').value;
+    const color = document.getElementById('thread-color').value;
+    const quantity = parseInt(document.getElementById('thread-quantity').value) || 0;
+
+    try {
+        const response = await fetch(`${API_URL}/api/threads`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name, brand, color, quantity })
+        });
+        if (response.ok) {
+            loadThreads();
+            // Clear form
+            document.getElementById('thread-name').value = '';
+            document.getElementById('thread-brand').value = '';
+            document.getElementById('thread-color').value = '';
+            document.getElementById('thread-quantity').value = '';
+        }
+    } catch (error) {
+        console.error('Error adding thread:', error);
+    }
+}
+
+async function editThread(id) {
+    // Implementation for editing thread
+    const thread = await fetch(`${API_URL}/api/threads/${id}`).then(r => r.json());
+    // Populate form and show edit modal
+}
+
+async function deleteThread(id) {
+    if (confirm('Delete this thread?')) {
+        try {
+            await fetch(`${API_URL}/api/threads/${id}`, { method: 'DELETE' });
+            loadThreads();
+        } catch (error) {
+            console.error('Error deleting thread:', error);
+        }
+    }
+}
+
+// Material Management Functions
+async function loadMaterials() {
+    try {
+        const response = await fetch(`${API_URL}/api/materials`);
+        const materials = await response.json();
+        const materialsList = document.getElementById('materials-list');
+        if (materialsList) {
+            materialsList.innerHTML = materials.map(material => `
+                <div class="material-item" data-id="${material.id}">
+                    <div class="material-info">
+                        <strong>${escapeHtml(material.name)}</strong>
+                        <span>${escapeHtml(material.type || 'Unknown Type')}</span>
+                        <span>${material.quantity || 0} ${material.unit || 'units'}</span>
+                    </div>
+                    <div class="material-actions">
+                        <button onclick="editMaterial(${material.id})">Edit</button>
+                        <button onclick="deleteMaterial(${material.id})">Delete</button>
+                    </div>
+                </div>
+            `).join('');
+        }
+    } catch (error) {
+        console.error('Error loading materials:', error);
+    }
+}
+
+async function addMaterial() {
+    const name = document.getElementById('material-name').value;
+    const type = document.getElementById('material-type').value;
+    const quantity = parseInt(document.getElementById('material-quantity').value) || 0;
+    const unit = document.getElementById('material-unit').value;
+
+    try {
+        const response = await fetch(`${API_URL}/api/materials`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name, type, quantity, unit })
+        });
+        if (response.ok) {
+            loadMaterials();
+            // Clear form
+            document.getElementById('material-name').value = '';
+            document.getElementById('material-type').value = '';
+            document.getElementById('material-quantity').value = '';
+            document.getElementById('material-unit').value = '';
+        }
+    } catch (error) {
+        console.error('Error adding material:', error);
+    }
+}
+
+// Barcode Functions
+async function handleBarcodeScan(barcode) {
+    try {
+        const response = await fetch(`${API_URL}/api/barcodes/lookup/${barcode}`);
+        const data = await response.json();
+        if (data.found) {
+            // Populate form with barcode data
+            document.getElementById('pattern-name').value = data.name || '';
+            document.getElementById('pattern-category').value = data.category || '';
+            // Show success message
+            showToast('Barcode found and data populated!', 'success');
+        } else {
+            showToast('Barcode not found in database', 'warning');
+        }
+    } catch (error) {
+        console.error('Error looking up barcode:', error);
+        showToast('Error looking up barcode', 'error');
+    }
+}
+
+async function generateBarcodeForPattern(patternId) {
+    try {
+        const response = await fetch(`${API_URL}/api/barcodes/generate/${patternId}`, {
+            method: 'POST'
+        });
+        const data = await response.json();
+        if (data.barcode) {
+            // Display barcode image
+            const barcodeImg = document.getElementById(`barcode-${patternId}`);
+            if (barcodeImg) {
+                barcodeImg.src = data.barcodeImage;
+                barcodeImg.style.display = 'block';
+            }
+        }
+    } catch (error) {
+        console.error('Error generating barcode:', error);
+    }
+}
+
+// OCR Functions
+async function performOCR(file) {
+    const formData = new FormData();
+    formData.append('file', file);
+
+    try {
+        const response = await fetch(`${API_URL}/api/ocr`, {
+            method: 'POST',
+            body: formData
+        });
+        const data = await response.json();
+        return data.text || '';
+    } catch (error) {
+        console.error('Error performing OCR:', error);
+        return '';
+    }
+}
+
+// Threadloop Integration
+async function importFromThreadloop(url) {
+    try {
+        const response = await fetch(`${API_URL}/api/threadloop/import`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ url })
+        });
+        const data = await response.json();
+        if (data.success) {
+            showToast('Pattern imported from Threadloop!', 'success');
+            loadPatterns(); // Refresh patterns list
+        } else {
+            showToast('Failed to import from Threadloop', 'error');
+        }
+    } catch (error) {
+        console.error('Error importing from Threadloop:', error);
+        showToast('Error importing from Threadloop', 'error');
+    }
+}
+
+// Enhanced upload function with OCR and image support
+async function uploadPattern(file, metadata) {
+    const formData = new FormData();
+    formData.append('file', file);
+    formData.append('name', metadata.name);
+    formData.append('category', metadata.category);
+    formData.append('description', metadata.description);
+    formData.append('needleSize', metadata.needleSize);
+    formData.append('yarnWeight', metadata.yarnWeight);
+    formData.append('yardage', metadata.yardage);
+    formData.append('gauge', metadata.gauge);
+    formData.append('difficulty', metadata.difficulty);
+    formData.append('enableOCR', metadata.enableOCR);
+    formData.append('generateBarcode', metadata.generateBarcode);
+
+    // Add threads and materials
+    if (metadata.threads && metadata.threads.length > 0) {
+        formData.append('threads', JSON.stringify(metadata.threads));
+    }
+    if (metadata.materials && metadata.materials.length > 0) {
+        formData.append('materials', JSON.stringify(metadata.materials));
+    }
+
+    try {
+        const response = await fetch(`${API_URL}/api/patterns`, {
+            method: 'POST',
+            body: formData
+        });
+        const result = await response.json();
+        if (result.success) {
+            // Generate barcode if requested
+            if (metadata.generateBarcode && result.patternId) {
+                await generateBarcodeForPattern(result.patternId);
+            }
+            return result;
+        } else {
+            throw new Error(result.error || 'Upload failed');
+        }
+    } catch (error) {
+        console.error('Error uploading pattern:', error);
+        throw error;
+    }
+}
+
+// Initialize new features on page load
+document.addEventListener('DOMContentLoaded', function() {
+    // Initialize thread and material management if on those tabs
+    if (document.getElementById('threads-nav-btn')) {
+        document.getElementById('threads-nav-btn').addEventListener('click', loadThreads);
+    }
+    if (document.getElementById('materials-nav-btn')) {
+        document.getElementById('materials-nav-btn').addEventListener('click', loadMaterials);
+    }
+
+    // Initialize barcode scanner
+    const barcodeInput = document.getElementById('barcode-input');
+    if (barcodeInput) {
+        barcodeInput.addEventListener('input', function(e) {
+            if (e.target.value.length >= 8) { // Minimum barcode length
+                handleBarcodeScan(e.target.value);
+            }
+        });
+    }
+
+    // Initialize Threadloop import
+    const threadloopImportBtn = document.getElementById('threadloop-import-btn');
+    if (threadloopImportBtn) {
+        threadloopImportBtn.addEventListener('click', function() {
+            const url = document.getElementById('threadloop-url').value;
+            if (url) {
+                importFromThreadloop(url);
+            }
+        });
+    }
+});
+
 // --- Yarn CRUD ---
 
 async function loadYarns() {
