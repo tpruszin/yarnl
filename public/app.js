@@ -5827,14 +5827,14 @@ async function uploadStagedFile(stagedFile) {
     // Add extended metadata
     if (stagedFile.needleSize) formData.append('needleSize', stagedFile.needleSize);
     if (stagedFile.yarnWeight) formData.append('yarnWeight', stagedFile.yarnWeight);
-    if (stagedFile.yardage) formData.append('yardage', stagedFile.yardage);
+    if (stagedFile.yardage) formData.append('yardageRequired', stagedFile.yardage);
     if (stagedFile.gauge) formData.append('gauge', stagedFile.gauge);
-    if (stagedFile.finishedSize) formData.append('finishedSize', stagedFile.finishedSize);
+    if (stagedFile.finishedSize) formData.append('sizeRange', stagedFile.finishedSize);
     if (stagedFile.skillLevel) formData.append('skillLevel', stagedFile.skillLevel);
 
     // Add feature toggles
     formData.append('enableOcr', stagedFile.enableOcr || false);
-    formData.append('enableBarcode', stagedFile.enableBarcode || false);
+    formData.append('generateBarcode', stagedFile.enableBarcode || false);
 
     try {
         const xhr = new XMLHttpRequest();
@@ -17984,8 +17984,10 @@ const PATTERN_COLUMNS = {
     difficulty: { label: 'Difficulty', value: p => p.difficulty ? p.difficulty + '/10' : '—' },
     completed_date: { label: 'Completed', value: p => p.completed_date ? new Date(p.completed_date).toLocaleDateString() : '—' },
     started_date: { label: 'Started', value: p => p.started_date ? new Date(p.started_date).toLocaleDateString() : '—' },
+    inventory_id: { label: 'ID', value: p => p.inventory_id ? `<span class="inventory-id">${escapeHtml(p.inventory_id)}</span>` : '—' },
+    barcode: { label: 'Barcode', value: p => p.barcode ? `<img src="${API_URL}/api/patterns/${p.id}/barcode" class="barcode-thumbnail" alt="Barcode" title="${escapeHtml(p.barcode)}">` : '—' },
 };
-const DEFAULT_PATTERN_COL_ORDER = ['thumbnail', 'name', 'category', 'tags', 'type', 'status', 'added', 'opened', 'time', 'description', 'favorite', 'rating', 'difficulty', 'completed_date', 'started_date'];
+const DEFAULT_PATTERN_COL_ORDER = ['thumbnail', 'name', 'category', 'tags', 'type', 'status', 'inventory_id', 'barcode', 'added', 'opened', 'time', 'description', 'favorite', 'rating', 'difficulty', 'completed_date', 'started_date'];
 
 function getColumnsConfig(type) {
     return type === 'pattern' ? PATTERN_COLUMNS : (type === 'yarn' ? YARN_COLUMNS : HOOK_COLUMNS);
@@ -18750,6 +18752,16 @@ document.addEventListener('DOMContentLoaded', function() {
     }
     if (document.getElementById('materials-nav-btn')) {
         document.getElementById('materials-nav-btn').addEventListener('click', loadMaterials);
+    }
+
+    // Add event listeners for Add Thread and Add Material buttons
+    const addThreadBtn = document.getElementById('add-thread-btn');
+    if (addThreadBtn) {
+        addThreadBtn.addEventListener('click', addThread);
+    }
+    const addMaterialBtn = document.getElementById('add-material-btn');
+    if (addMaterialBtn) {
+        addMaterialBtn.addEventListener('click', addMaterial);
     }
 
     // Initialize barcode scanner
